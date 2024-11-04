@@ -171,7 +171,7 @@ control Ingress(
     apply {
         //处理通知包
         if(hdr.inthdr.isValid()){
-            notify_packet_register_update((bit<32>)hdr.inthdr.header_type);
+            notify_packet_register_update.execute((bit<32>)hdr.inthdr.header_type);
             if(hdr.inthdr.header_type == 2){//下游交换机第一次接收到
                 hdr.inthdr.header_type = 3; //标记为返回包
                 hdr.inthdr.egress_queue_length = (bit<32>)ig_tm_md.ucast_egress_port; //先将原有的port信息暂时存到egress_queue_length字段里面

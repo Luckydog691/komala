@@ -5,27 +5,6 @@
 
 #include "includes/headers.p4"
  
-
-
-
-
-
-/*************************************************************************
- **************  I N G R E S S   P R O C E S S I N G   *******************
- *************************************************************************/
- 
-    /***********************  H E A D E R S  ************************/
-
-
-
-    /******  G L O B A L   I N G R E S S   M E T A D A T A  *********/
-
-//包头固定长度
-#define PACKET_HEADER_FIXED_SIZE 53
-
-
-
-    /***********************  P A R S E R  **************************/
 parser IngressParser(packet_in        pkt,
     /* User */    
     out my_ingress_headers_t          hdr,
@@ -34,9 +13,7 @@ parser IngressParser(packet_in        pkt,
     out ingress_intrinsic_metadata_t  ig_intr_md)
 {
 
-    
-    /* This is a mandatory state, required by Tofino Architecture */
-     state start {
+    state start {
         pkt.extract(ig_intr_md);
         pkt.advance(PORT_METADATA_SIZE);
         inthdr_h inthdr = pkt.lookahead<inthdr_h>();
@@ -46,6 +23,7 @@ parser IngressParser(packet_in        pkt,
             default: parse_ethernet;
         }
     }
+
     //通知数据包
     state parse_notify_packet_head{
         pkt.extract(hdr.inthdr);
@@ -55,10 +33,9 @@ parser IngressParser(packet_in        pkt,
     state parse_ethernet {
         pkt.extract(hdr.ethernet);
         transition select(hdr.ethernet.ether_type) {
-            //ETHERTYPE_TPID:  parse_vlan_tag;
             TYPECODE_IPV4:  parse_ipv4;
-            TYPECODE_ROCE:  parse_ib_route;
-           // ETHERTYPE_ARP:   parse_arp;
+            TYPECODE_IPV6:  parse_ipv6;
+            TYPECODE_ROCE:  parse_ipv6;
             default: accept;
         }
     }
@@ -67,30 +44,19 @@ parser IngressParser(packet_in        pkt,
         pkt.extract(hdr.ipv4);
         transition select(hdr.ipv4.protocol) {
             TYPECODE_UDP: parse_udp;
-            //TYPECODE_TCP: parse_tcp;
             default: accept;
         }
     }
 
     state parse_udp {
         pkt.extract(hdr.udp);
-        transition select(hdr.udp.dst_port) {
-            ROCE_PORT: parse_ib_transport;
-            default: accept;
-        }
-    }
-
-    state parse_ib_route {
-        pkt.extract(hdr.ib_route);
-        transition parse_ib_transport;
-    }
-
-    state parse_ib_transport {
-        pkt.extract(hdr.ib_transport);
         transition accept;
     }
 
-
+    state parse_ipv6 {
+        pkt.extract(hdr.ipv6);
+        transition accept;
+    }
 }
 
 struct flow_detection_data {
@@ -118,9 +84,18 @@ control Ingress(
             result = 0;
             if (meta.timestamp_new > EXPIRE_TIME_INTERVAL + reg){
                 //发送通知包
+                reg = meta.timestamp_new;
                 result = 1;
             }
-            reg = meta.timestamp_new;
+            
+        }
+    };
+
+    Register<bit<32>, bit<32>>(size=4) notify_packet_register;
+
+    RegisterAction<bit<32>, bit<32>, bit<1>>(notify_packet_register)notify_packet_register_update = {
+        void apply(inout bit<32> reg){
+            reg=reg+1;
         }
     };
 
@@ -163,7 +138,7 @@ control Ingress(
     }
 
     table ipv6_lpm_group {
-        key = { hdr.ib_route.dst_gid : lpm; }
+        key = { hdr.ipv6.dst_gid : lpm; }
         actions = {
             set_path; drop;
             @defaultonly NoAction;
@@ -196,6 +171,7 @@ control Ingress(
     apply {
         //处理通知包
         if(hdr.inthdr.isValid()){
+            notify_packet_register_update((bit<32>)hdr.inthdr.header_type);
             if(hdr.inthdr.header_type == 2){//下游交换机第一次接收到
                 hdr.inthdr.header_type = 3; //标记为返回包
                 hdr.inthdr.egress_queue_length = (bit<32>)ig_tm_md.ucast_egress_port; //先将原有的port信息暂时存到egress_queue_length字段里面
@@ -203,14 +179,14 @@ control Ingress(
             }
             else{//数据返回给了上游交换机
             //else if(hdr.inthdr.header_type == 3){
-                ig_dprsr_md.digest_type = 2;
+                ig_dprsr_md.digest_type = 1;
                 drop();
             }
         }else{
             //正常路由
             if (hdr.ethernet.ether_type == TYPECODE_IPV4) {
                 ipv4_lpm_group.apply();
-            } else if(hdr.ethernet.ether_type == TYPECODE_ROCE && hdr.ib_route.ip_version==6){
+            } else if(hdr.ethernet.ether_type == TYPECODE_ROCE || hdr.ethernet.ether_type == TYPECODE_IPV6){
                 ipv6_lpm_group.apply();
             }
             path_port.apply();
@@ -219,7 +195,6 @@ control Ingress(
             meta.timestamp_new = (bit<32>)(ig_intr_md.ingress_mac_tstamp >> 16);
             bit<1> mirror_decision = mirror_packet_register_update.execute(meta.path_id);
             if(mirror_decision==1){
-                ig_dprsr_md.digest_type = 1;
                 acl_mirror();
             }
 
@@ -247,7 +222,7 @@ control IngressDeparser(packet_out pkt,
     in    ingress_intrinsic_metadata_for_deparser_t  ig_dprsr_md)
 {
     //通过digest让控制平面处理端口信息
-    Digest<digest_local_t>() digest_local;
+    //Digest<digest_local_t>() digest_local;
     Digest<digest_remote_t>() digest_remote;
 
 
@@ -260,9 +235,7 @@ control IngressDeparser(packet_out pkt,
         }
 
         if(ig_dprsr_md.digest_type == 1){
-            //digest_local.pack({meta.port_id});
-        }else if(ig_dprsr_md.digest_type == 2){
-            //digest_remote.pack({hdr.inthdr.path_id, hdr.inthdr.egress_queue_length});
+            digest_remote.pack({hdr.inthdr.path_id, hdr.inthdr.egress_queue_length});
         }
         pkt.emit(hdr);
     }
@@ -327,7 +300,7 @@ control Egress(
     };
 
     //mirror寄存器测试
-    Register<bit<32>, bit<32>>(size=3) mirror_register;
+    Register<bit<32>, bit<32>>(size=4) mirror_register;
     RegisterAction<bit<32>, bit<32>, bit<32>>(mirror_register)mirror_register_update = {
         void apply(inout bit<32> reg){
             reg = reg + 1;
@@ -335,22 +308,23 @@ control Egress(
     };
 
     apply {
+        mirror_register_update.execute((bit<32>)hdr.inthdr.header_type);
         //判断包类型
         if(hdr.inthdr.header_type == 1){
             //正常包，去掉自定义包头
             egress_queue_length_register_update.execute(eg_intr_md.egress_port);
             hdr.inthdr.setInvalid();
+            
         }else if(hdr.inthdr.header_type == 2){
             //刚新建的通知包
-            mirror_register_update.execute(0);
         }else{
             //if(hdr.inthdr.header_type == 3){
             //从上游交换机来的通知包，要bounce回去
             //这里是用egress_queue_length字段暂存了原路径的端口信息
             bit<32> tmp = egress_queue_length_register_get.execute((PortId_t)hdr.inthdr.egress_queue_length);
             hdr.inthdr.egress_queue_length = tmp;
-            mirror_register_update.execute(2);
         }
+        
     }
 }
 

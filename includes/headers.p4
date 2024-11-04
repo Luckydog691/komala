@@ -59,7 +59,7 @@ header ib_transport_h {
     bit<24> pkt_seq_num;
 }
 
-header ib_route_h {
+header ipv6_h {
     bit<4> ip_version;
     bit<8> traffic_class;
     bit<20> flow_label;
@@ -90,7 +90,7 @@ struct my_ingress_headers_t {
     ethernet_h   ethernet;
     ipv4_h       ipv4;
     udp_h        udp;
-    ib_route_h   ib_route;
+    ipv6_h   ipv6;
     ib_transport_h   ib_transport;
 }
 
@@ -109,7 +109,7 @@ struct my_egress_headers_t {
     ethernet_h   ethernet;
     ipv4_h       ipv4;
     udp_h        udp;
-    ib_route_h   ib_route;
+    ipv6_h   ipv6;
     ib_transport_h   ib_transport;
 }
 
